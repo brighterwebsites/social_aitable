@@ -16,6 +16,7 @@ import {
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import fetch from 'node-fetch';
+import 'dotenv/config';
 
 // Configuration
 const CONFIG = {
