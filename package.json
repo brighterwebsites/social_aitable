@@ -1,0 +1,23 @@
+{
+  "name": "wordpress-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for WordPress content analysis and auditing",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "keywords": [
+    "mcp",
+    "wordpress",
+    "content-analysis"
+  ],
+  "author": "Brighter Websites",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "dotenv": "^17.2.3",
+    "node-fetch": "^3.3.2"
+  }
+}
