@@ -1,10 +1,10 @@
 # WordPress MCP Server for Brighter Websites
 
-A Model Context Protocol (MCP) server that connects Claude to your WordPress site for content analysis and auditing against your documented content architecture frameworks.
+A Model Context Protocol (MCP) server that connects AI platforms to your WordPress site for content analysis and auditing against your documented content architecture frameworks.
 
 ## What This Does
 
-This MCP server allows Claude to:
+This MCP server allows AI platforms (Claude, ChatGPT, OpenAI Agents) to:
 - **Read and analyze** your WordPress content (posts, pages, portfolio items)
 - **Access full CAR data** (Content Architecture Records) including:
   - Content strategy fields (maturity level, intent, purpose)
@@ -13,6 +13,20 @@ This MCP server allows Claude to:
   - SEO metadata and optimization status
 - **Audit content** against your SCOS (Strategic Content Operating System) framework
 - **Search and filter** content by various criteria
+
+## Two Deployment Options
+
+### 1. **Local MCP** (Claude Desktop only)
+- Runs on your local machine
+- Connects via stdio transport
+- Quick setup, perfect for testing
+- **See setup instructions below** ⬇️
+
+### 2. **Remote MCP** (Claude.ai, ChatGPT, OpenAI Agents)
+- Runs on your VPS with HTTPS
+- Accessible via URL from any AI platform
+- Requires SSL certificate and nginx
+- **See [REMOTE-MCP-SETUP.md](REMOTE-MCP-SETUP.md)** 🌐
 
 ## Setup
 
