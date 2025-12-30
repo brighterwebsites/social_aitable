@@ -112,20 +112,25 @@ class WordPressClient {
 // Initialize WordPress client
 const wpClient = new WordPressClient(CONFIG);
 
-// Create MCP Server
-function createMCPServer() {
-  const server = new Server(
-    {
-      name: CONFIG.serverName,
-      version: CONFIG.serverVersion,
+// Session management for multiple clients
+const transports = new Map();
+
+// Create MCP Server (ONCE - reused across all connections)
+const mcpServer = new Server(
+  {
+    name: CONFIG.serverName,
+    version: CONFIG.serverVersion,
+  },
+  {
+    capabilities: {
+      tools: {},
+      resources: {},
     },
-    {
-      capabilities: {
-        tools: {},
-        resources: {},
-      },
-    }
-  );
+  }
+);
+
+// Configure MCP Server handlers
+function configureMCPServer(server) {
 
   // MCP Tools
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -368,9 +373,10 @@ NOTE: Detailed framework documentation should be added to /docs/ folder.
 
     throw new Error(`Resource not found: ${uri}`);
   });
-
-  return server;
 }
+
+// Configure the server once at startup
+configureMCPServer(mcpServer);
 
 // Express app setup
 const app = express();
@@ -582,20 +588,30 @@ app.get('/sse', authenticate, async (req, res) => {
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
 
-    const server = createMCPServer();
-    const transport = new SSEServerTransport('/message', res);
+    // Create transport with /messages endpoint (note: plural)
+    const transport = new SSEServerTransport('/messages', res);
+    const sessionId = transport.sessionId;
 
+    // Store transport for session
+    transports.set(sessionId, transport);
+    console.log(`📝 Session created: ${sessionId}`);
+
+    // Clean up on close
+    res.on('close', () => {
+      transports.delete(sessionId);
+      console.log(`❌ Session closed: ${sessionId}`);
+    });
+
+    res.on('error', (error) => {
+      transports.delete(sessionId);
+      console.error(`❌ Session error (${sessionId}):`, error.message);
+    });
+
+    // Connect the SINGLE server instance to this transport
     console.log('🔌 Connecting MCP server to transport...');
-    await server.connect(transport);
-    console.log('✅ MCP server connected successfully');
+    await mcpServer.connect(transport);
+    console.log(`✅ MCP server connected successfully (session: ${sessionId})`);
 
-    req.on('close', () => {
-      console.log('❌ SSE connection closed by client');
-    });
-
-    req.on('error', (error) => {
-      console.error('❌ SSE connection error:', error.message);
-    });
   } catch (error) {
     console.error('❌ Error in SSE endpoint:', error);
     if (!res.headersSent) {
@@ -605,9 +621,33 @@ app.get('/sse', authenticate, async (req, res) => {
 });
 
 // MCP message endpoint (with OAuth/API key auth)
-app.post('/message', authenticate, async (req, res) => {
-  // This endpoint is handled by the SSE transport
-  res.status(200).end();
+// CRITICAL: This handles client messages (initialization, tool calls, etc.)
+app.post('/messages', authenticate, async (req, res) => {
+  const sessionId = req.query.sessionId;
+
+  if (!sessionId) {
+    console.error('❌ No sessionId provided in POST /messages');
+    return res.status(400).json({ error: 'sessionId query parameter required' });
+  }
+
+  const transport = transports.get(sessionId);
+
+  if (!transport) {
+    console.error(`❌ No transport found for session: ${sessionId}`);
+    return res.status(404).json({ error: 'Session not found' });
+  }
+
+  try {
+    console.log(`📨 Handling message for session: ${sessionId}`);
+    // THIS IS THE CRITICAL FIX - process the MCP protocol message
+    await transport.handlePostMessage(req, res, req.body);
+    console.log(`✅ Message handled for session: ${sessionId}`);
+  } catch (error) {
+    console.error(`❌ Error handling message for session ${sessionId}:`, error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    }
+  }
 });
 
 // Start server
