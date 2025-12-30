@@ -571,16 +571,37 @@ app.get('/health', (req, res) => {
 
 // MCP SSE endpoint (with OAuth/API key auth)
 app.get('/sse', authenticate, async (req, res) => {
-  console.log('New SSE connection established');
+  console.log('✅ New SSE connection established');
+  console.log('   Client:', req.headers['user-agent']);
+  console.log('   Origin:', req.headers.origin);
 
-  const server = createMCPServer();
-  const transport = new SSEServerTransport('/message', res);
+  try {
+    // Set SSE headers
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
 
-  await server.connect(transport);
+    const server = createMCPServer();
+    const transport = new SSEServerTransport('/message', res);
 
-  req.on('close', () => {
-    console.log('SSE connection closed');
-  });
+    console.log('🔌 Connecting MCP server to transport...');
+    await server.connect(transport);
+    console.log('✅ MCP server connected successfully');
+
+    req.on('close', () => {
+      console.log('❌ SSE connection closed by client');
+    });
+
+    req.on('error', (error) => {
+      console.error('❌ SSE connection error:', error.message);
+    });
+  } catch (error) {
+    console.error('❌ Error in SSE endpoint:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    }
+  }
 });
 
 // MCP message endpoint (with OAuth/API key auth)
