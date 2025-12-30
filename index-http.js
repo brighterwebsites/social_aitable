@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * WordPress MCP Server - HTTP/SSE Transport (Remote)
+ * WordPress MCP Server - HTTP/SSE Transport (Remote) with OAuth 2.0
  *
  * Supports remote connections from:
  * - Claude.ai web
@@ -21,6 +21,7 @@ import {
 import fetch from 'node-fetch';
 import express from 'express';
 import cors from 'cors';
+import crypto from 'crypto';
 import 'dotenv/config';
 
 // Configuration
@@ -31,8 +32,15 @@ const CONFIG = {
   serverName: process.env.MCP_SERVER_NAME || 'BrighterWebsites WordPress MCP',
   serverVersion: process.env.MCP_SERVER_VERSION || '1.0.0',
   port: process.env.PORT || 3000,
+  baseUrl: process.env.BASE_URL || 'https://mcp.brighterwebsites.com.au',
   mcpApiKey: process.env.MCP_API_KEY || 'your-secure-api-key-here',
+  oauthClientId: process.env.OAUTH_CLIENT_ID || 'brighterwebsites-mcp-client',
+  oauthClientSecret: process.env.OAUTH_CLIENT_SECRET || crypto.randomBytes(32).toString('hex'),
 };
+
+// In-memory token store (for production, use Redis or database)
+const tokenStore = new Map();
+const authCodeStore = new Map();
 
 // WordPress API Client
 class WordPressClient {
@@ -394,23 +402,161 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// API Key Authentication Middleware
-function authenticateApiKey(req, res, next) {
+// OAuth 2.0 Helper Functions
+function generateToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function generateAuthCode() {
+  return crypto.randomBytes(16).toString('hex');
+}
+
+// Authentication Middleware (supports both OAuth tokens and API keys)
+function authenticate(req, res, next) {
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Missing or invalid authorization header' });
   }
 
-  const apiKey = authHeader.substring(7); // Remove 'Bearer ' prefix
+  const token = authHeader.substring(7); // Remove 'Bearer ' prefix
 
-  if (apiKey !== CONFIG.mcpApiKey) {
-    return res.status(401).json({ error: 'Invalid API key' });
+  // Check if it's a valid OAuth access token
+  if (tokenStore.has(token)) {
+    const tokenData = tokenStore.get(token);
+
+    // Check if token is expired
+    if (tokenData.expiresAt < Date.now()) {
+      tokenStore.delete(token);
+      return res.status(401).json({ error: 'Token expired' });
+    }
+
+    req.user = tokenData.user;
+    return next();
   }
 
-  next();
+  // Check if it's the API key (fallback for direct API key auth)
+  if (token === CONFIG.mcpApiKey) {
+    req.user = { type: 'api_key' };
+    return next();
+  }
+
+  return res.status(401).json({ error: 'Invalid token' });
 }
+
+// OAuth 2.0 Endpoints
+
+// OAuth metadata endpoint (for auto-discovery)
+app.get('/.well-known/oauth-authorization-server', (req, res) => {
+  res.json({
+    issuer: CONFIG.baseUrl,
+    authorization_endpoint: `${CONFIG.baseUrl}/oauth/authorize`,
+    token_endpoint: `${CONFIG.baseUrl}/oauth/token`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code', 'client_credentials'],
+    token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic'],
+  });
+});
+
+// Authorization endpoint (step 1 of OAuth flow)
+app.get('/oauth/authorize', (req, res) => {
+  const { response_type, client_id, redirect_uri, state, scope } = req.query;
+
+  // Validate client
+  if (client_id !== CONFIG.oauthClientId) {
+    return res.status(400).json({ error: 'invalid_client', error_description: 'Invalid client ID' });
+  }
+
+  // For auto-approval (no user consent screen needed for MCP)
+  // Generate authorization code
+  const authCode = generateAuthCode();
+
+  authCodeStore.set(authCode, {
+    clientId: client_id,
+    redirectUri: redirect_uri,
+    scope: scope || '',
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 600000, // 10 minutes
+  });
+
+  // Redirect back with auth code
+  const redirectUrl = new URL(redirect_uri || 'http://localhost/callback');
+  redirectUrl.searchParams.set('code', authCode);
+  if (state) redirectUrl.searchParams.set('state', state);
+
+  res.redirect(redirectUrl.toString());
+});
+
+// Token endpoint (step 2 of OAuth flow)
+app.post('/oauth/token', (req, res) => {
+  const { grant_type, code, client_id, client_secret, redirect_uri } = req.body;
+
+  // Validate client credentials
+  if (client_id !== CONFIG.oauthClientId || client_secret !== CONFIG.oauthClientSecret) {
+    return res.status(401).json({ error: 'invalid_client', error_description: 'Invalid client credentials' });
+  }
+
+  if (grant_type === 'authorization_code') {
+    // Exchange authorization code for access token
+    if (!authCodeStore.has(code)) {
+      return res.status(400).json({ error: 'invalid_grant', error_description: 'Invalid authorization code' });
+    }
+
+    const authCodeData = authCodeStore.get(code);
+
+    // Check if code is expired
+    if (authCodeData.expiresAt < Date.now()) {
+      authCodeStore.delete(code);
+      return res.status(400).json({ error: 'invalid_grant', error_description: 'Authorization code expired' });
+    }
+
+    // Delete used auth code (one-time use)
+    authCodeStore.delete(code);
+
+    // Generate access token
+    const accessToken = generateToken();
+    const refreshToken = generateToken();
+
+    tokenStore.set(accessToken, {
+      user: { client_id },
+      scope: authCodeData.scope,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 3600000, // 1 hour
+      refreshToken,
+    });
+
+    return res.json({
+      access_token: accessToken,
+      token_type: 'Bearer',
+      expires_in: 3600,
+      refresh_token: refreshToken,
+      scope: authCodeData.scope,
+    });
+  }
+
+  if (grant_type === 'client_credentials') {
+    // Direct client credentials grant (simpler flow)
+    const accessToken = generateToken();
+
+    tokenStore.set(accessToken, {
+      user: { client_id },
+      scope: 'read write',
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 3600000, // 1 hour
+    });
+
+    return res.json({
+      access_token: accessToken,
+      token_type: 'Bearer',
+      expires_in: 3600,
+      scope: 'read write',
+    });
+  }
+
+  return res.status(400).json({ error: 'unsupported_grant_type' });
+});
 
 // Health check endpoint (no auth required)
 app.get('/health', (req, res) => {
@@ -419,11 +565,12 @@ app.get('/health', (req, res) => {
     server: CONFIG.serverName,
     version: CONFIG.serverVersion,
     timestamp: new Date().toISOString(),
+    oauth_enabled: true,
   });
 });
 
-// MCP SSE endpoint
-app.get('/sse', authenticateApiKey, async (req, res) => {
+// MCP SSE endpoint (with OAuth/API key auth)
+app.get('/sse', authenticate, async (req, res) => {
   console.log('New SSE connection established');
 
   const server = createMCPServer();
@@ -436,8 +583,8 @@ app.get('/sse', authenticateApiKey, async (req, res) => {
   });
 });
 
-// MCP message endpoint
-app.post('/message', authenticateApiKey, async (req, res) => {
+// MCP message endpoint (with OAuth/API key auth)
+app.post('/message', authenticate, async (req, res) => {
   // This endpoint is handled by the SSE transport
   res.status(200).end();
 });
@@ -451,16 +598,21 @@ async function main() {
   }
 
   if (CONFIG.mcpApiKey === 'your-secure-api-key-here') {
-    console.error('WARNING: Using default MCP_API_KEY. Please set a secure API key in .env file');
+    console.warn('WARNING: Using default MCP_API_KEY. Set a secure key in .env for production.');
   }
 
   app.listen(CONFIG.port, () => {
-    console.log(`🚀 WordPress MCP Server (HTTP/SSE) running on port ${CONFIG.port}`);
-    console.log(`📍 Health check: http://localhost:${CONFIG.port}/health`);
-    console.log(`🔌 MCP endpoint: http://localhost:${CONFIG.port}/sse`);
+    console.log(`🚀 WordPress MCP Server (HTTP/SSE) with OAuth 2.0 running on port ${CONFIG.port}`);
+    console.log(`📍 Health check: ${CONFIG.baseUrl}/health`);
+    console.log(`🔌 MCP endpoint: ${CONFIG.baseUrl}/sse`);
     console.log(`🌐 Connected to: ${CONFIG.wordpressUrl}`);
-    console.log(`🔑 API Key authentication: ${CONFIG.mcpApiKey !== 'your-secure-api-key-here' ? 'ENABLED' : 'DISABLED (default key)'}`);
-    console.log('\nReady to accept connections from Claude.ai, ChatGPT, and OpenAI Agents!');
+    console.log(`🔐 OAuth Client ID: ${CONFIG.oauthClientId}`);
+    console.log(`🔑 OAuth Client Secret: ${CONFIG.oauthClientSecret.substring(0, 8)}...`);
+    console.log(`\n📖 OAuth Endpoints:`);
+    console.log(`   - Authorization: ${CONFIG.baseUrl}/oauth/authorize`);
+    console.log(`   - Token: ${CONFIG.baseUrl}/oauth/token`);
+    console.log(`   - Metadata: ${CONFIG.baseUrl}/.well-known/oauth-authorization-server`);
+    console.log('\n✅ Ready to accept connections from Claude.ai, ChatGPT, and OpenAI Agents!');
   });
 }
 
